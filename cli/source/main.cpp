@@ -1,78 +1,30 @@
+#include "config.hpp"
+#include "parser.hpp"
+#include "version.hpp"
+
 #include "raylib.h"
 #include <opencv2/opencv.hpp>
 #include <opencv2/highgui.hpp>
 #include <a2i/spectrogram.hpp>
+
 #include <thread>
 #include <atomic>
 #include <iostream>
-#include "config.hpp"
-#include "parser.hpp"
-#include "version.hpp"
-#include "nlohmann/json.hpp"
 #include <sys/stat.h>
 #include <sys/types.h>
-
-#ifdef _WIN32
-#include <conio.h>
-#else
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
-#endif
-
-#ifdef _WIN32
-int getch() {
-    return _getch();
-}
-
-int kbhit() {
-    return _kbhit();
-}
-#else
-int getch() {
-    struct termios oldt, newt;
-    int ch;
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    ch = getchar();
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    return ch;
-}
-
-int kbhit() {
-    struct termios oldt, newt;
-    int ch;
-    int oldf;
-
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
-
-    ch = getchar();
-
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    fcntl(STDIN_FILENO, F_SETFL, oldf);
-
-    if (ch != EOF) {
-        ungetc(ch, stdin);
-        return 1;
-    }
-
-    return 0;
-}
-#endif
+#include <deque>
+#include <vector>
+#include <chrono>
+#include <sys/select.h>
 
 typedef struct {
-  std::vector<cv::Mat> prev;
-  cv::Mat img;
-  cv::Mat cur_img;
-  cv::Mat grid;
-
+    std::deque<cv::Mat> prev;    // теперь очередь для истории
+    cv::Mat img;
+    cv::Mat cur_img;
+    cv::Mat grid;
 } Window;
 
 typedef struct {
@@ -80,11 +32,10 @@ typedef struct {
     float right;
 } Frame;
 
+// Глобальные переменные
 Window w;
-
 a2i::Spectrogram g;
-
-std::pair<int, int> WINDOW;
+std::pair<int,int> WINDOW;
 unsigned int FRAME_SIZE;
 int multiplier;
 bool SHOW = false;
@@ -92,24 +43,48 @@ bool DEBUG_MODE;
 bool ONLY_AUDIO;
 bool MIC_MODE;
 
-auto config = Config();
-
+Config config;
 std::atomic<bool> PAUSE(true);
 std::atomic<bool> RUNNING(true);
 
+// Терминал в raw‑режим один раз
+static struct termios orig_termios;
+void enableRawMode() {
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+}
+void disableRawMode() {
+    tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
+}
 
+// kbhit через select (не блочит, немного жрёт CPU без sleep)
+int kbhit() {
+    fd_set set;
+    struct timeval tv{0,0};
+    FD_ZERO(&set);
+    FD_SET(STDIN_FILENO, &set);
+    return select(STDIN_FILENO+1, &set, nullptr, nullptr, &tv) == 1;
+}
 
-void callback(void *bufferData, unsigned int frames) {
+// getch в raw‑режиме (блокирует)
+int getch() {
+    return getchar();
+}
+
+void callback(void* bufferData, unsigned int frames) {
     if (frames < 512) return;
+    auto* fs = static_cast<Frame*>(bufferData);
 
-    Frame *fs = static_cast<Frame*>(bufferData);
-
+    // сдвигаем старые выборки в кольце
     if (g.in.size() == FRAME_SIZE) {
-        g.in.erase(g.in.begin(), g.in.begin() + 512);
+        std::rotate(g.in.begin(), g.in.begin() + 512, g.in.end());
+        g.in.resize(FRAME_SIZE - 512);
     }
-
-    for (size_t i = 0; i < 512; ++i) {
-        g.in.push_back((fs[i].left + fs[i].right) / 2);
+    // добавляем новые
+    for (unsigned int i = 0; i < 512; ++i) {
+        g.in.push_back((fs[i].left + fs[i].right) * 0.5f);
     }
 
     if (g.in.size() == FRAME_SIZE) {
@@ -122,195 +97,194 @@ void callback(void *bufferData, unsigned int frames) {
     }
 }
 
-void handleConsoleInput(Music &music, std::atomic<bool> &RUNNING) {
+void handleConsoleInput(Music &music) {
     while (RUNNING) {
         if (kbhit()) {
             int key = getch();
-            if (key == ' ') {
-                if (PAUSE)
-                    PauseMusicStream(music);
-                else
-                    ResumeMusicStream(music);
-                PAUSE = !PAUSE;
-            } else if (key == 'q' || key == 'Q') {
-                RUNNING = false;
-                break;
-            } else if (key == 'd' || key == 'D') {
-                float current_time = GetMusicTimePlayed(music);
-                SeekMusicStream(music, current_time + 5.0f);
-            } else if (key == 'a' || key == 'A') {
-                float current_time = GetMusicTimePlayed(music);
-                SeekMusicStream(music, current_time - 5.0f);
+            switch (key) {
+                case ' ':
+                    if (PAUSE) PauseMusicStream(music);
+                    else       ResumeMusicStream(music);
+                    PAUSE = !PAUSE;
+                    break;
+                case 'q': case 'Q':
+                    RUNNING = false;
+                    return;
+                case 'd': case 'D':
+                    SeekMusicStream(music, GetMusicTimePlayed(music) + 5.0f);
+                    break;
+                case 'a': case 'A':
+                    SeekMusicStream(music, GetMusicTimePlayed(music) - 5.0f);
+                    break;
             }
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
 bool processKey(Music& music) {
-    if (cv::getWindowProperty("a2i", cv::WND_PROP_AUTOSIZE) == 1) {
-        return 0;
-    }
+  int key = cv::waitKey(1);
 
-    int key = cv::waitKey(1);
-
-    if (key == ' ') {
-        if (PAUSE) PauseMusicStream(music);
-        else ResumeMusicStream(music);
-        PAUSE = !PAUSE;
-    }
-
-    if (key == 27 || key == 'q' || key == 'Q') {
-        RUNNING = false;
-        return 0;
-    }
-    if (key == 83 || key == 'd' || key == 'D') {
-        float current_time = GetMusicTimePlayed(music);
-        SeekMusicStream(music, current_time + 5.0f);
-    }
-    if (key == 81 || key == 'a' || key == 'A') {
-        float current_time = GetMusicTimePlayed(music);
-        SeekMusicStream(music, current_time - 5.0f);
-    }
-
-    return 1;
+  if (key == ' ') {
+      if (PAUSE) PauseMusicStream(music);
+      else       ResumeMusicStream(music);
+      PAUSE = !PAUSE;
+  }
+  if (key == 27 || key == 'q' || key == 'Q') {
+      RUNNING = false;
+      return false;
+  }
+  if (key == 'd' || key == 'D' || key == 83) {
+      SeekMusicStream(music, GetMusicTimePlayed(music) + 5.0f);
+  }
+  if (key == 'a' || key == 'A' || key == 81) {
+      SeekMusicStream(music, GetMusicTimePlayed(music) - 5.0f);
+  }
+  return true;
 }
 
-void processAudio() {
-  w.img = cv::Mat(WINDOW.first, WINDOW.second, CV_8UC3, cv::Scalar(22, 16, 20));
-  if (config.get<bool>("grid")) cv::add(w.grid, w.img, w.img);
-  w.cur_img = cv::Mat::zeros(WINDOW.first, WINDOW.second, CV_8UC3);
-  
-  g.drawSpectrum(w.cur_img, config.get<int>("l"), config.get<int>("g"), config.get<int>("fill"), config.get<bool>("b"), config.get<cv::Scalar>("lc"), config.get<cv::Scalar>("ulc"), config.get<int>("gc"));
+void processAudio(std::deque<cv::Mat>& history) {
+    // фон
+    w.img = cv::Mat(WINDOW.first, WINDOW.second, CV_8UC3, cv::Scalar(22,16,20));
+    if (config.params.grid) cv::add(w.grid, w.img, w.img);
 
-  if(config.get<int>("n") > 0)
-  {
-    for (int i = config.get<int>("n") - 1; i >= 0; --i) {
-        cv::addWeighted(w.img, 1.0, w.prev[i], 0.3 / (i+1), 0.0, w.img);
+    // рисуем новый спектр
+    w.cur_img = cv::Mat::zeros(WINDOW.first, WINDOW.second, CV_8UC3);
+    g.drawSpectrum(
+        w.cur_img,
+        config.params.lineType,
+        config.params.graphMode,
+        config.params.fillType,
+        config.params.border,
+        config.params.lineColor,
+        config.params.underlineColor,
+        config.params.colormapCoef
+    );
+
+    // накопление предыдущих кадров через историю
+    for (size_t i = 0; i < history.size(); ++i) {
+        double alpha = 0.3 / (i + 1);
+        cv::addWeighted(w.img, 1.0, history[i], alpha, 0.0, w.img);
     }
-  }
+    cv::add(w.cur_img, w.img, w.img);
 
+    // колоризация
+    if (config.params.colormap >= 0)
+        cv::applyColorMap(w.img, w.img, config.params.colormap);
 
-  cv::add(w.cur_img, w.img, w.img);
-  if (config.get<int>("grad") > -1) cv::applyColorMap(w.img, w.img, config.get<int>("grad"));
+    // показ
+    cv::imshow("a2i", w.img);
 
-  cv::imshow("a2i", w.img);
-
-  if(config.get<int>("n") > 0)
-  {
-    for (int i = config.get<int>("n") - 1; i > 0; --i) {
-        w.prev[i] = w.prev[i - 1].clone();
-    }
-
-    w.cur_img.copyTo(w.prev[0]);
-  }
+    // обновляем историю (кольцевой буфер)
+    if (history.size() == config.params.previousFrames)
+        history.pop_back();
+    history.push_front(w.cur_img.clone());
 }
 
 int main(int argc, char** argv) {
     Parser parser(argc, argv, config);
+    if (config.end) return 0;
+    if (!config.validate()) { std::cerr<<"Config error\n"; return 1; }
+    if (!config.execute()) return 0;
 
-    // std::cout << config.configJson << std::endl;
-
-    if(config.end) {
-      return 0;
-    }
-
-    if(!config.validate()) {
-      std::cout << "Error: !config.validate().\n";
-      //написать внутри валидейта проверки и прокидывания исключений
-      return 0;
-    }
-
-    if(!config.execute()) {
-      return 0;
-    }
-
-
-    auto file = config.get<std::string>("audiofile");
+    std::string file = config.audiofile;
     if (file.empty()) {
-        std::cout << "Error: No audio file specified.\n";
+        std::cerr<<"Error: No audio file\n";
         parser.printUsage();
         return 0;
     }
-    const char *file_path = file.c_str();
 
-    ONLY_AUDIO = config.get<bool>("onlyaudio");
-    DEBUG_MODE = config.get<bool>("debug");
-    MIC_MODE = config.get<std::string>("command") == "mic" ? true : false;
-    WINDOW = config.get<std::pair<int, int>>("s");
-    FRAME_SIZE = config.get<unsigned int>("f");
+    ONLY_AUDIO = config.params.onlyAudio;
+    DEBUG_MODE  = config.params.debug;
+    MIC_MODE    = (config.command=="mic");
+    WINDOW      = config.params.windowSize;
+    FRAME_SIZE  = config.params.framesize;
+    multiplier  = config.params.normalizeMultiplier;
 
-    if (!DEBUG_MODE) {
+    if (!DEBUG_MODE)
         SetTraceLogLevel(LOG_WARNING);
-    }
 
+    enableRawMode();  // raw‑режим терминала
+
+    // инициализируем аудио
     InitAudioDevice();
-    AudioStream stream;
-    Music music;
+    AudioStream stream{};
+    Music music{};
 
     if (MIC_MODE && !ONLY_AUDIO) {
-        stream = LoadAudioStream(44100, 16, 1);
+        stream = LoadAudioStream(44100,16,1);
         PlayAudioStream(stream);
     } else {
-        music = LoadMusicStream(file_path);
+        music = LoadMusicStream(file.c_str());
         PlayMusicStream(music);
-        SetMusicVolume(music, config.get<float>("v"));
-        if (!ONLY_AUDIO) {
+        SetMusicVolume(music, config.params.volume);
+        if (!ONLY_AUDIO)
             AttachAudioStreamProcessor(music.stream, callback);
-        }
     }
 
+    // GUI
+    std::vector<Frame> audioBuffer(FRAME_SIZE);
+    std::deque<cv::Mat> history;
     if (!ONLY_AUDIO) {
-        g.setAudioInfo(music.stream.sampleRate, config.get<std::pair<int, int>>("a"));
-        g.setFreqRange({20, 20000}); // это тоже флаг сделать
+        g.setSampleRate(music.stream.sampleRate);
+        g.setDbRange(config.params.amplitudeRange);
+        g.setFreqRange({20,20000});
         g.setFrameSize(FRAME_SIZE);
-        g.setWindowFunc(config.get<int>("f"));
+        g.setWindowFunc(config.params.windowFunc);
+
         cv::namedWindow("a2i", cv::WINDOW_NORMAL);
         cv::resizeWindow("a2i", WINDOW.second, WINDOW.first);
+
+        w.prev.clear();
+        w.prev.resize(config.params.previousFrames);
+        w.grid = cv::Mat::zeros(WINDOW.first, WINDOW.second, CV_8UC3);
+        if (config.params.grid) {
+            g.drawGrid(w.grid, config.params.graphMode, true,
+                       {20,50,100,200,500,1000,2000,5000,10000,20000},
+                       10,
+                       config.params.gridLineColor,
+                       config.params.gridTextColor);
+        }
+        cv::imshow("a2i", cv::Mat(WINDOW.first, WINDOW.second, CV_8UC3, cv::Scalar(22,16,20)));
+        cv::waitKey(1);
     }
 
-    std::thread consoleInputThread(handleConsoleInput, std::ref(music), std::ref(RUNNING));
+    // поток для консоли
+    std::thread consoleThread(handleConsoleInput, std::ref(music));
 
-    w.img = cv::Mat(WINDOW.first, WINDOW.second, CV_8UC3, cv::Scalar(22, 16, 20));
-    w.prev = std::vector<cv::Mat>(config.get<int>("n"), cv::Mat::zeros(WINDOW.first, WINDOW.second, CV_8UC3));
-
-    w.cur_img = cv::Mat::zeros(WINDOW.first, WINDOW.second, CV_8UC3);
-    w.grid = cv::Mat::zeros(WINDOW.first, WINDOW.second, CV_8UC3);
-    if (config.get<bool>("grid")) g.drawGrid(w.grid, config.get<int>("g"), 1, {20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000}, 10, config.get<cv::Scalar>("glc"), config.get<cv::Scalar>("gtc"));
-
+    // главное окно- и аудио-циклы
     while (RUNNING) {
         if (MIC_MODE && !ONLY_AUDIO) {
-            unsigned int frames = config.get<unsigned int>("FrameSize");
-            Frame *buffer = (Frame *)malloc(frames * sizeof(Frame));
             if (IsAudioStreamProcessed(stream)) {
-                UpdateAudioStream(stream, buffer, frames);
-                callback(buffer, frames);
+                UpdateAudioStream(stream, audioBuffer.data(), FRAME_SIZE);
+                callback(audioBuffer.data(), FRAME_SIZE);
             }
-            free(buffer);
         } else {
             UpdateMusicStream(music);
-
-            if (!ONLY_AUDIO) {
-              if(!processKey(music)) break;
-            }
+            if (!processKey(music)) break;
         }
 
         if (SHOW && !ONLY_AUDIO) {
-            processAudio();
+            processAudio(history);
         }
+
+        // ограничение CPU / FPS (~60 fps)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    consoleInputThread.join();
+    consoleThread.join();
 
+    // очистка
     if (MIC_MODE && !ONLY_AUDIO) {
         StopAudioStream(stream);
         UnloadAudioStream(stream);
     } else {
         UnloadMusicStream(music);
     }
-
     CloseAudioDevice();
-
+    disableRawMode();
     cv::destroyAllWindows();
-
     return 0;
 }
+
+

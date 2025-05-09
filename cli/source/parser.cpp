@@ -1,11 +1,57 @@
 #include "parser.hpp"
 #include "version.hpp"
+
 #include <iostream>
 #include <stdexcept>
 #include <sstream>
 #include <fstream>
 #include <cstdlib>
 #include <nlohmann/json.hpp>
+
+nlohmann::json Parser::arguments = {
+  { "commands", {
+      { "config", {
+          { "needValue", 0 },
+          { "needFlags", 0 },
+          { "subcommands", {
+              { "write",         { { "needValue", 1 }, { "needFlags", 0 } } },
+              { "rename",        { { "needValue", 2 }, { "needFlags", 0 } } },
+              { "reset-default", { { "needValue", 0 }, { "needFlags", 0 } } }
+          }}
+      }},
+      { "mic", {
+          { "needValue", 0 },
+          { "needFlags", 1 }
+      }}
+  }},
+  { "flags", {
+      // вот примеры ключей, добавьте по аналогии остальные из defaultFlags
+      { "framesize",      { { "dash", 2 }, { "needValue", 1 } } },
+      { "window-func",    { { "dash", 2 }, { "needValue", 1 } } },
+      { "line-type",      { { "dash", 2 }, { "needValue", 1 } } },
+      { "graph-mode",     { { "dash", 2 }, { "needValue", 1 } } },
+      { "previous-frames",{ { "dash", 2 }, { "needValue", 1 } } },
+      { "colormap",       { { "dash", 2 }, { "needValue", 1 } } },
+      { "fill-type",      { { "dash", 2 }, { "needValue", 1 } } },
+      { "colormap-coef",  { { "dash", 2 }, { "needValue", 1 } } },
+      { "normalize-multiplier", { { "dash", 2 }, { "needValue", 1 } } },
+      { "volume",         { { "dash", 2 }, { "needValue", 1 } } },
+      { "window-size",         { { "dash", 2 }, { "needValue", 1 } } },
+      { "border",         { { "dash", 2 } } },
+      { "grid",           { { "dash", 2 } } },
+      { "onlyaudio",      { { "dash", 2 } } },
+      { "debug",          { { "dash", 2 } } },
+      // глобальные флаги
+      { "help",           { { "dash", 2 } } },
+      { "version",        { { "dash", 2 } } }
+  }},
+  { "controls", {
+      { "space", { { "about", "Play/Pause" } } },
+      { "a",     { { "about", "Seek backward" } } },
+      { "d",     { { "about", "Seek forward" } } },
+      { "q",     { { "about", "Quit" } } }
+  }}
+};
 
 Parser::Parser(int argc, char** argv, Config& c) {
     if(argc == 1) {
@@ -18,37 +64,22 @@ Parser::Parser(int argc, char** argv, Config& c) {
 }
 
 void Parser::loadConfigFromFile(Config& c, std::string configName) {
-    auto filename = c.getConfigFilePath();
-    std::ifstream configFile(filename);
-    nlohmann::json flags;
-    if (configFile.is_open()) {
-        configFile >> flags;
-        if (flags.contains(configName)) {
-            auto defaultConfig = flags[configName];
-            for (auto& item : defaultConfig.items()) {
-                if (arguments["flags"].contains(item.key()) && arguments["flags"][item.key()]["dash"] == 1) {
-                    c.set(item.key(), item.value());
-                } else {
-                    std::cout << "Unknown flag in default config: " << item.key() << std::endl;
-                }
-            }
-        } else {
-            std::cout << "Configuration '" << configName << "' not found. Loading default settings." << std::endl;
-            loadDefault(c);
-        }
-    } else {
-        std::cerr << "Failed to open config file: " << filename << std::endl;
-        loadDefault(c);
-    }
-}
-
-
-void Parser::loadDefault(Config& c) {
-    for (auto& f : arguments["flags"].items()) {
-      if(f.value()["dash"] == 1 && f.value().contains("default")) {
-        c.set(f.key(), f.value()["default"]);
+  auto filename = c.getConfigFilePath();
+  std::ifstream configFile(filename);
+  nlohmann::json flags;
+  if (configFile.is_open()) {
+      configFile >> flags;
+      if (flags.contains(configName)) {
+          auto defaultConfig = flags[configName];
+             for (auto& item : defaultConfig.items()) {
+                 c.set(item.key(), item.value());
+             }
+      } else {
+          std::cout << "Configuration '" << configName << "' not found. Loading default settings." << std::endl;
       }
-    }
+  } else {
+      std::cerr << "Failed to open config file: " << filename << std::endl;
+  }
 }
 
 void Parser::parseArgs(int argc, char** argv, Config& c) {
@@ -136,27 +167,35 @@ void Parser::parseArgs(int argc, char** argv, Config& c) {
     for (int i = counter; i < argc && needFlags; ++i) {
         std::string arg = argv[i];
 
-        if (arg[0] == '-' && arg[1] != '-') {
-            size_t equalPos = arg.find('=');
-            std::string flag = arg.substr(1, equalPos - 1);
-            if (arguments["flags"].contains(flag)) {
-                if (arguments["flags"][flag].contains("needValue") && arguments["flags"][flag]["needValue"]) {
-                    if (equalPos + 1 < arg.length()) {
-                        std::string value = arg.substr(equalPos + 1);
-                        c.set(flag, value);
-                    } else {
-                        throw std::runtime_error("Expected value for flag -" + flag);
-                    }
-                } else {
-                    c.set(flag, true);
-                }
-            } else {
-                throw std::runtime_error("Unknown flag -" + flag);
-            }
-        }
-        else {
-            throw std::runtime_error("Unknown argument: " + arg);
-        }
+        if (arg.rfind("--", 0) == 0) {
+          // --flag или --flag=value
+          size_t eq = arg.find('=');
+          std::string flag = (eq != std::string::npos)
+              ? arg.substr(2, eq - 2)
+              : arg.substr(2);
+          if (!arguments["flags"].contains(flag))
+              throw std::runtime_error("Unknown flag --" + flag);
+
+          bool needsValue = arguments["flags"][flag].value("needValue", 0);
+          if (needsValue) {
+              std::string val;
+              if (eq != std::string::npos) {
+                  val = arg.substr(eq + 1);
+              } else if (i + 1 < argc) {
+                  val = argv[++i];  // читаем следующий токен
+              } else {
+                  throw std::runtime_error("Expected value for flag --" + flag);
+              }
+              nlohmann::json jv;
+              jv = nlohmann::json::parse(val);
+              c.set(flag, jv);
+          } else {
+              c.set(flag, true);
+          }
+      }
+      else {
+          throw std::runtime_error("Unknown argument: " + arg);
+      }
     }
     
     c.end = false;

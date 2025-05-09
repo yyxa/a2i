@@ -1,9 +1,13 @@
-cmake_minimum_required(VERSION 3.5.1)
+cmake_minimum_required(VERSION 3.14)
 
 project(a2i LANGUAGES CXX VERSION 1.0.0)
 
 set(CMAKE_BUILD_TYPE RELEASE)
 set(CMAKE_CXX_STANDARD 20)
+
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "$ENV{HOME}/.local" CACHE PATH "User install prefix" FORCE)
+endif()
 
 set(SOURCE_DIR "source")
 set(INCLUDE_DIR "include")
@@ -16,24 +20,31 @@ include(GNUInstallDirs)
 
 add_library(a2i STATIC ${LIB_SOURCES})
 
+#find_package(PkgConfig REQUIRED)
+#pkg_search_module(FFTW REQUIRED fftw3 IMPORTED_TARGET)
+#target_link_libraries(a2i PRIVATE PkgConfig::FFTW)
+#pkg_check_modules(FFTW REQUIRED fftw3)
+#target_include_directories(a2i PRIVATE ${FFTW_INCLUDE_DIRS})
+#target_link_libraries(a2i PRIVATE ${FFTW_LIBRARIES})
+
+#find_package(PkgConfig REQUIRED)
+#pkg_search_module(FFTW REQUIRED fftw3 IMPORTED_TARGET)
+#target_link_libraries(a2i PRIVATE PkgConfig::FFTW)
+
 find_package(PkgConfig REQUIRED)
-pkg_search_module(FFTW REQUIRED fftw3 IMPORTED_TARGET)
-if(FFTW_FOUND)
-    # message("FFTW found")
-    target_include_directories(a2i PRIVATE ${FFTW_INCLUDE_DIRS})
-    target_link_libraries(a2i PRIVATE ${FFTW_LIBRARIES})
-else()
-    message(FATAL_ERROR "FFTW not found")
-endif()
+pkg_check_modules(FFTW3 REQUIRED IMPORTED_TARGET fftw3)
+#pkg_check_modules(FFTW3_THREADS REQUIRED IMPORTED_TARGET fftw3_threads)
+target_link_libraries(a2i PRIVATE PkgConfig::FFTW3)
+
+
 
 find_package(OpenCV CONFIG REQUIRED)
-if(OpenCV_FOUND)
-    # message("OpenCV found")
-    target_include_directories(a2i PRIVATE ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(a2i PRIVATE ${OpenCV_LIBS})
-else()
-    message(FATAL_ERROR "OpenCV not found")
-endif()
+#target_include_directories(a2i PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(a2i PRIVATE ${OpenCV_LIBS})
+
+find_package(OpenMP REQUIRED)
+target_compile_options(a2i PRIVATE ${OpenMP_CXX_FLAGS})
+target_link_libraries(a2i PRIVATE OpenMP::OpenMP_CXX)
 
 target_include_directories(a2i PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

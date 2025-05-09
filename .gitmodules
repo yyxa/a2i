@@ -1,3 +1,0 @@
-[submodule "cli/json"]
-	path = cli/json
-	url = https://github.com/nlohmann/json

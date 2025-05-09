@@ -10,3 +10,7 @@ temp.cpp
 temp.json
 Makefile
 install.log
+shell.nix
+conan
+cmake
+__pycache__

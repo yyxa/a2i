@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5.1)
+cmake_minimum_required(VERSION 3.14)
 
 project(a2i LANGUAGES CXX VERSION 1.0.0)
 
@@ -7,11 +7,12 @@ set(CMAKE_CXX_STANDARD 20)
 
 set(SOURCE_DIR "source")
 set(INCLUDE_DIR "include")
-set(JSON_DIR "json/single_include")
+# set(JSON_DIR "json/single_include")
 
 file(GLOB_RECURSE CLI_SOURCES CONFIGURE_DEPENDS "${SOURCE_DIR}/*.cpp")
 
-include_directories(${INCLUDE_DIR} ${JSON_DIR})
+# include_directories(${INCLUDE_DIR} ${JSON_DIR})
+include_directories(${INCLUDE_DIR})
 
 add_executable(${PROJECT_NAME} ${CLI_SOURCES})
 
@@ -39,9 +40,12 @@ find_package(a2i REQUIRED)
 find_package(OpenCV REQUIRED)
 # message("OpenCV found")
 
+find_package(nlohmann_json REQUIRED)
+
 include_directories(${OpenCV_INCLUDE_DIRS})
 
-target_link_libraries(${PROJECT_NAME} PUBLIC 
+target_link_libraries(${PROJECT_NAME} PRIVATE 
   raylib
   ${OpenCV_LIBS}
-  a2i::a2i)
+  a2i::a2i
+  nlohmann_json::nlohmann_json)

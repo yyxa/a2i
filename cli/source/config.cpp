@@ -1,97 +1,103 @@
+// Config.cpp
 #include "config.hpp"
+#include "version.hpp"
+
 #include <fstream>
 #include <iostream>
-#include <stdexcept>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <unistd.h>
-#include <type_traits>
-#include <sstream>
 
 Config::Config() {
-    
+    // всё, что нужно для defaults, уже задано в Params::Params()
 }
 
 bool Config::execute() const {
-  auto command = get<std::string>("command");
-
-  if (command == "play") {
-      executePlayFromAudiofile();
-      return 1;
-  } else if (command == "mic") {
-      executePlayFromMic();
-      return 1;
-  }  else if (command == "config") {
-      executeConfig();
-      return 0;
-  }  else {
-      std::cout << "Unknown command" << std::endl;
-      return 0;
-  }
+    if (command == "play") {
+        executePlayFromAudiofile();
+        return true;
+    } else if (command == "mic") {
+        executePlayFromMic();
+        return true;
+    } else if (command == "config") {
+        executeConfig();
+        return false;
+    } else {
+        std::cout << "Unknown command\n";
+        return false;
+    }
 }
 
 void Config::executePlayFromAudiofile() const {
-
-  std::cout << "play" << std::endl;
+    std::cout << "play\n";
 }
 
 void Config::executePlayFromMic() const {
-
-  std::cout << "mic" << std::endl;
+    std::cout << "mic\n";
 }
 
 void Config::executeConfig() const {
-  // субкомманды обрабатывать
-  std::string filename = getConfigFilePath();
-  saveToFile(filename, "default");
-  std::cout << "Default configuration successfully saved in ~/.a2i/config.json" << std::endl;
+    saveToFile(getConfigFilePath(), "default");
+    std::cout << "Default configuration successfully saved in "
+                 "~/.config/a2i/config.json\n";
 }
 
-bool Config::saveToFile(const std::string& filename, const std::string& configname) const {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        return false;
-    }
+bool Config::saveToFile(const std::string& filename,
+                        const std::string& configname) const {
+    mkdir((filename.substr(0, filename.find_last_of('/'))).c_str(), 0755);
+    std::ofstream f(filename);
+    if (!f.is_open()) return false;
 
-    nlohmann::json outputJson;
-    outputJson[configname] = configJson;
-
-    outputJson[configname].erase("config");
-    outputJson[configname].erase("command");
-    outputJson[configname].erase("subcommand");
-
-    file << outputJson.dump(4);
+    nlohmann::json out = {
+        {configname, params.toJson()}
+    };
+    f << out.dump(4);
     return true;
 }
 
 std::string Config::getConfigFilePath() const {
-    std::string homeDir = getenv("HOME");
-    std::string configDir = homeDir + "/.a2i";
-    mkdir(configDir.c_str(), 0755);
-    return configDir + "/config.json";
+    const char* h = getenv("HOME");
+    std::string dir = std::string(h ? h : ".") + "/.config/a2i";
+    // mkdir(dir.c_str(), 0755); // уже делаем в saveToFile
+    return dir + "/config.json";
 }
 
 bool Config::validate() const {
-    auto frameSize = get<int>("f");
-    auto windowFunction = get<int>("w");
-    auto lineType = get<int>("l");
-    auto graphMode = get<int>("g");
-    auto numberOfPreviousFrames = get<int>("n");
-    auto colormap = get<int>("grad");
-    auto fillType = get<int>("fill");
-    auto gradientCoefficient = get<int>("gc");
-    auto volume = get<float>("v");
+    return params.framesize >= 512
+        && (params.framesize & (params.framesize - 1)) == 0
+        && params.windowFunc >= 0 && params.windowFunc <= 9
+        && params.lineType >= 0 && params.lineType <= 2
+        && params.graphMode >= 0 && params.graphMode <= 1
+        && params.previousFrames >= 0
+        && params.colormap >= 0 && params.colormap <= 21
+        && params.fillType >= 0 && params.fillType <= 2
+        && params.colormapCoef >= 0 && params.colormapCoef <= 255
+        && params.volume >= 0.0f && params.volume <= 1.0f;
+}
 
-    if (frameSize < 512 || (frameSize & (frameSize - 1)) != 0 ||
-        windowFunction < 0 || windowFunction > 9 ||
-        lineType < 0 || lineType > 2 ||
-        graphMode < 0 || graphMode > 1 ||
-        numberOfPreviousFrames <= 0 ||
-        colormap < 0 || colormap > 21 ||
-        fillType < 0 || fillType > 2 ||
-        gradientCoefficient < 0 || gradientCoefficient > 255 ||
-        volume < 0.0f || volume > 1.0f) {
-        return false;
-    }
-    return true;
+void Config::set(const std::string& key, const nlohmann::json& v) {
+    // здесь мапим ключи на поля params (и на command, audiofile...)
+    if (key == "framesize")         params.framesize     = v;
+    else if (key == "window-func")  params.windowFunc    = v;
+    else if (key == "line-type")    params.lineType      = v;
+    else if (key == "graph-mode")   params.graphMode     = v;
+    else if (key == "previous-frames") params.previousFrames = v;
+    else if (key == "colormap")     params.colormap      = v;
+    else if (key == "fill-type")    params.fillType      = v;
+    else if (key == "colormap-coef")  params.colormapCoef = v;
+    else if (key == "volume")       params.volume        = v;
+    else if (key == "border")       params.border        = v;
+    else if (key == "grid")         params.grid          = v;
+    else if (key == "onlyaudio")    params.onlyAudio     = v;
+    else if (key == "debug")        params.debug         = v;
+    else if (key == "command")      command              = v;
+    else if (key == "subcommand")   subcommand           = v;
+    else if (key == "audiofile")    audiofile            = v;
+    // для массивов и цветов можно либо расширить, либо закинуть через Params::loadFromJson
+}
+
+void Config::push_back(const std::string& key, const std::string& value) {
+    if (key == "command_arguments")
+        command_arguments.push_back(value);
+    else if (key == "subcommand_arguments")
+        subcommand_arguments.push_back(value);
 }
